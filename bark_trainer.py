@@ -7,7 +7,10 @@ Uses DRO (differential reinforcement of other behaviour) with an interval that g
   2. Training: start the quiet interval well below the dog's average time between barks,
      so a treat arrives before it is likely to bark. Each treat earned stretches the
      next interval by `growth`, up to `max_interval`.
-  3. Any bark resets the timer and drops the interval back to its starting value.
+  3. Any bark resets the timer and drops the interval back to the session's starting value.
+  4. Progress is saved to a file after every treat. The next session skips the baseline
+     and starts part-way back from the previous session's best (see --resume-fraction),
+     never easier than the very first starting interval. Use --fresh to start over.
 
 Hardware is optional:
   - Microphone: needs `pip install sounddevice numpy`. Without it, use --simulate.
@@ -25,13 +28,15 @@ Examples:
 
 import argparse
 import csv
+import json
 import logging
+import os
 import queue
 import random
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 
 log = logging.getLogger("bark_trainer")
 
@@ -77,6 +82,56 @@ class DROSchedule:
         self.interval = min(self.interval * self.cfg.growth, self.cfg.max_interval)
         self.deadline = now + self.interval
         return True
+
+
+# ---------------------------------------------------------------- saved progress
+
+DEFAULT_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dog_progress.json")
+
+
+@dataclass
+class Progress:
+    """What carries over from one session to the next (saved as JSON)."""
+    base_interval: float              # starting interval from the very first baseline
+    best_last_session: float = 0.0    # longest quiet interval rewarded in the latest session
+    history: list = field(default_factory=list)
+
+    def start_interval(self, resume_fraction, cfg):
+        """Next session starts part-way back from last session's best, but never easier
+        than the original start. A bad session (no long quiet) lowers the next start."""
+        start = max(self.base_interval, resume_fraction * self.best_last_session)
+        return max(cfg.min_interval, min(start, cfg.max_interval))
+
+    def begin_session(self, start_interval):
+        self.history.append({"date": time.strftime("%Y-%m-%d %H:%M"),
+                             "start_interval": round(start_interval, 1),
+                             "minutes": 0, "treats": 0, "barks": 0, "longest_quiet": 0})
+
+    def update_session(self, sched, elapsed):
+        self.best_last_session = sched.longest_interval_earned
+        self.history[-1].update(minutes=round(elapsed / 60, 1), treats=sched.treats,
+                                barks=sched.barks,
+                                longest_quiet=round(sched.longest_interval_earned, 1))
+
+
+def load_progress(path):
+    try:
+        with open(path) as f:
+            d = json.load(f)
+        return Progress(float(d["base_interval"]), float(d.get("best_last_session", 0)),
+                        list(d.get("history", [])))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        sys.exit(f"Couldn't read saved progress in {path} ({e}).\n"
+                 f"Fix or delete that file, or run with --fresh to start over.")
+
+
+def save_progress(path, progress):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(asdict(progress), f, indent=2)
+    os.replace(tmp, path)   # atomic: a power cut never leaves a half-written file
 
 
 # ---------------------------------------------------------------- hardware
@@ -171,15 +226,27 @@ def drain(q):
 def run_live(args, cfg):
     events_out = EventLog(args.log_file)
     dispenser = make_dispenser(args)
+    progress = None if args.fresh else load_progress(args.state_file)
     with BarkDetector(args.threshold, args.min_bark_ms, device=args.device) as mic:
-        if args.baseline > 0:
-            log.info("Baseline: listening for %.0f s without rewarding...", args.baseline)
-            time.sleep(args.baseline)
-            n = len(drain(mic.events))
-            cfg.initial_interval = initial_interval_from_baseline(n, args.baseline, args.fraction, cfg)
-            log.info("Baseline: %d barks (%.2f/min). Starting interval: %.1f s",
-                     n, n / args.baseline * 60, cfg.initial_interval)
-            events_out.write("baseline", n, cfg.initial_interval)
+        if progress:
+            cfg.initial_interval = progress.start_interval(args.resume_fraction, cfg)
+            log.info("Resuming saved progress: %d earlier sessions, best last time %.1f s. "
+                     "Starting interval: %.1f s", len(progress.history),
+                     progress.best_last_session, cfg.initial_interval)
+        else:
+            if args.baseline > 0:
+                log.info("Baseline: listening for %.0f s without rewarding...", args.baseline)
+                time.sleep(args.baseline)
+                n = len(drain(mic.events))
+                cfg.initial_interval = initial_interval_from_baseline(n, args.baseline, args.fraction, cfg)
+                log.info("Baseline: %d barks (%.2f/min). Starting interval: %.1f s",
+                         n, n / args.baseline * 60, cfg.initial_interval)
+                events_out.write("baseline", n, cfg.initial_interval)
+            if os.path.exists(args.state_file):   # --fresh: keep the old file as a backup
+                os.replace(args.state_file, args.state_file + ".bak")
+                log.info("Old progress backed up to %s.bak", args.state_file)
+            progress = Progress(base_interval=cfg.initial_interval)
+        progress.begin_session(cfg.initial_interval)
 
         start = time.monotonic()
         sched = DROSchedule(cfg, start)
@@ -197,10 +264,15 @@ def run_live(args, cfg):
                     log.info("TREAT #%d (earned with %.1f s quiet); next needs %.1f s",
                              sched.treats, interval_just_earned, sched.interval)
                     events_out.write("treat", sched.treats, sched.interval)
+                    progress.update_session(sched, time.monotonic() - start)
+                    save_progress(args.state_file, progress)
                 time.sleep(0.05)
         except KeyboardInterrupt:
             pass
+    progress.update_session(sched, time.monotonic() - start)
+    save_progress(args.state_file, progress)
     summarize(sched, time.monotonic() - start)
+    log.info("Progress saved to %s", args.state_file)
     events_out.close()
 
 
@@ -225,7 +297,9 @@ def calibrate(args):
 # ---------------------------------------------------------------- simulation
 
 def run_simulation(args, cfg):
-    """Fake dog: barks at random (Poisson). Each treat earned lowers its bark rate a little."""
+    """Fake dog: barks at random (Poisson). Each treat earned lowers its bark rate a little,
+    and it forgets some of that between sessions. Progress is kept in memory only, so the
+    real dog's saved progress file is never touched."""
     rng = random.Random(args.seed)
     rate = 1 / args.sim_bark_gap          # barks per second
     dt = 0.1
@@ -240,6 +314,20 @@ def run_simulation(args, cfg):
     print(f"[baseline] {barks} barks in {args.baseline:.0f}s -> starting interval "
           f"{cfg.initial_interval:.1f}s")
 
+    progress = Progress(base_interval=cfg.initial_interval)
+    for n in range(1, args.sim_sessions + 1):
+        if n > 1:
+            cfg.initial_interval = progress.start_interval(args.resume_fraction, cfg)
+            rate = min(rate * 2, 1 / args.sim_bark_gap)   # some forgetting between sessions
+            print(f"\n=== Session {n}: resuming at {cfg.initial_interval:.1f}s "
+                  f"(last session's best was {progress.best_last_session:.1f}s) ===")
+        progress.begin_session(cfg.initial_interval)
+        sched, t, rate = simulate_session(args, cfg, rng, rate, dt)
+        progress.update_session(sched, t)
+        summarize(sched, t)
+
+
+def simulate_session(args, cfg, rng, rate, dt):
     sched = DROSchedule(cfg, 0.0)
     t, next_report = 0.0, 600.0
     while t < args.duration and sched.treats < args.max_treats:
@@ -256,7 +344,7 @@ def run_simulation(args, cfg):
             print(f"[{t/60:5.0f} min] treats={sched.treats:4d} barks={sched.barks:4d} "
                   f"current interval={sched.interval:7.1f}s  dog's mean bark gap={1/rate:7.0f}s")
             next_report += 600
-    summarize(sched, t)
+    return sched, t, rate
 
 
 # ---------------------------------------------------------------- shared helpers
@@ -293,6 +381,12 @@ def main(argv=None):
     s.add_argument("--min-interval", type=float, default=2.0)
     s.add_argument("--duration", type=float, default=3600, help="training session length in seconds")
     s.add_argument("--max-treats", type=int, default=150, help="stop after this many treats")
+    s.add_argument("--state-file", default=DEFAULT_STATE_FILE,
+                   help="where the dog's progress is saved between sessions (one file per dog)")
+    s.add_argument("--resume-fraction", type=float, default=0.5,
+                   help="next session starts at this fraction of last session's best interval")
+    s.add_argument("--fresh", action="store_true",
+                   help="ignore saved progress and start over with a new baseline (old file kept as .bak)")
     h = p.add_argument_group("hardware")
     h.add_argument("--threshold", type=float, default=-25.0, help="bark loudness threshold, dBFS")
     h.add_argument("--min-bark-ms", type=float, default=60)
@@ -309,6 +403,7 @@ def main(argv=None):
     m = p.add_argument_group("simulation")
     m.add_argument("--simulate", action="store_true", help="run against a fake dog, faster than real time")
     m.add_argument("--sim-bark-gap", type=float, default=10, help="fake dog's mean seconds between barks")
+    m.add_argument("--sim-sessions", type=int, default=1, help="number of back-to-back fake sessions")
     m.add_argument("--seed", type=int, default=1)
     m.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args(argv)

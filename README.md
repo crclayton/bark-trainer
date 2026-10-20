@@ -34,9 +34,25 @@ Each session has two phases.
 |---|---|
 | Start of training | Sets the first quiet interval to **half** the dog's usual gap between barks (about 4 seconds in the example). The dog gets a treat before it would normally bark, so it starts getting rewarded straight away. |
 | The dog stays quiet for the whole interval | Gives a treat, then makes the next interval **20% longer** (4 s → 4.8 s → 5.8 s → 6.9 s …), up to a limit of 15 minutes. |
-| The dog barks | Restarts the timer **and** drops the interval back to its starting length. |
+| The dog barks | Restarts the timer **and** drops the interval back to this session's starting length. |
 
 Over time the dog learns that quiet earns treats, and the quiet periods get longer.
+
+### Progress is saved between sessions
+
+The dog's progress is saved to a file called `dog_progress.json` (in the same folder as the program) after **every treat**, so even a power cut doesn't lose it. The next time you run the program:
+
+- **The baseline is skipped.** It's only measured the very first time.
+- **The session starts part-way back from the last session's best.** If the longest quiet stretch the dog was rewarded for last time was 80 seconds, the next session starts at **40 seconds** (half, by default). Starting a little below the dog's best gives it some easy early wins, which is standard training practice.
+- **A bark during that session resets to 40 seconds**, not to the original few seconds, so one bark doesn't wipe out days of progress.
+- **It never starts easier than the very first starting interval.**
+- **It corrects itself.** If a session goes badly (the dog barks a lot and only earns short intervals), the next session automatically starts easier.
+
+In the simulation, starting intervals over four 20-minute sessions went 4 s → 5 s → 11 s → 41 s.
+
+To start over completely (for example, after a long break or with a new dog), add `--fresh`. The old progress file is kept as a backup named `dog_progress.json.bak`.
+
+**More than one dog?** Give each dog its own progress file: `--state-file rex.json` and `--state-file bella.json`.
 
 In the simulation, a dog that started out barking every 8 seconds was going several minutes between barks after about 30 minutes, and its longest rewarded quiet stretch reached 77 seconds. Real dogs vary a lot, so treat that only as a rough illustration.
 
@@ -140,7 +156,7 @@ pip install sounddevice --break-system-packages
 python3 bark_trainer.py --simulate -v
 ```
 
-This runs a full session in a few seconds against a simulated dog, so you can watch how treats and resets happen. Lines look like:
+This runs a full session in a few seconds against a simulated dog, so you can watch how treats and resets happen. (Simulations never touch your real dog's progress file. Add `--sim-sessions 4` to see progress carry over between sessions.) Lines look like:
 
 ```
    4.4s  treat #1, next 3.6s
@@ -211,7 +227,13 @@ What you'll see:
 18:35:12 BARK  -> reset; next treat after 4.2 s of quiet
 ```
 
-To stop early, press **Ctrl + C**. The session also ends by itself after 1 hour or 150 treats, whichever comes first, and prints a summary.
+To stop early, press **Ctrl + C**. The session also ends by itself after 1 hour or 150 treats, whichever comes first, and prints a summary. Progress is saved either way.
+
+On later runs, the first line will instead look like:
+
+```
+18:30:00 Resuming saved progress: 3 earlier sessions, best last time 82.8 s. Starting interval: 41.4 s
+```
 
 ---
 
@@ -231,6 +253,9 @@ Add any of these to the command. Example: `--growth 1.1 --max-treats 80`.
 | `--min-interval` | `2` | Shortest interval allowed, so the dog has time to eat. |
 | `--duration` | `3600` | Session length in seconds (3600 = 1 hour). |
 | `--max-treats` | `150` | Session stops after this many treats. **Adjust for your dog's size and diet.** |
+| `--resume-fraction` | `0.5` | Where the next session starts, as a share of last session's best quiet interval. Higher = picks up closer to where the dog left off. |
+| `--state-file` | `dog_progress.json` | The file the dog's progress is saved in. Use a different file per dog. |
+| `--fresh` | — | Ignore saved progress and start over with a new baseline. The old file is kept as `.bak`. |
 
 ### Hardware settings
 
@@ -264,6 +289,8 @@ If you use `--log-file sessions.csv`, every event is added to that file. Open it
 
 Across several days, you're hoping to see **fewer barks per session** and the **interval column climbing higher** before resets. The file keeps growing across sessions, so you can compare days.
 
+You can also open `dog_progress.json` in any text editor. Its `history` list has one short summary per session (date, starting interval, minutes, treats, barks, and longest quiet stretch rewarded). Please don't edit it while the program is running.
+
 ---
 
 ## Safety and good practice
@@ -279,10 +306,13 @@ Across several days, you're hoping to see **fewer barks per session** and the **
 
 ## Known limitations
 
-1. **It reacts to any loud sound, not just barks.** The program measures loudness only. A doorbell, a dropped pan, or loud voices can count as a bark and reset the timer. Calibrate carefully and place the microphone close to the dog. A future improvement would be a trained bark-recognition model.
-2. **A bark drops all the way back to the start.** This was the original design. Many trainers prefer a softer reset that only steps back partway (for example to half the current interval), so one bark doesn't cancel a long run of progress. That's not built in yet; it would be a small change in the `on_bark` function in `bark_trainer.py`.
-3. **Each session starts fresh.** Progress isn't carried over between sessions; the baseline is re-measured every time.
-4. **Untested on real hardware.** The logic is tested in simulation only.
+1. **It reacts to any loud sound, not just barks.** The program measures loudness only. A doorbell, a dropped pan, or loud voices can count as a bark and reset the timer. Calibrate carefully and place the microphone close to the dog. Existing projects that could replace the loudness check with real bark recognition:
+   - [YAMNet](https://www.tensorflow.org/tutorials/audio/transfer_learning_audio) is Google's free, pre-trained sound recognizer. It already recognizes "Dog", "Bark", "Howl", "Yip", and about 500 other sounds, and it is small enough to run on a Raspberry Pi. This is the most promising starting point.
+   - [bark-monitor](https://pypi.org/project/bark-monitor) ([docs](https://malcolmmielle.codeberg.page/bark_monitor/@pages/)) is an existing Python bark monitor that can use either YAMNet or loudness. Its author notes YAMNet sometimes reacts to cats too.
+   - [TinyML Dog Bark Stopper](https://www.hackster.io/NathanielF/tinyml-dog-bark-stopper-77e436) is a bark/not-bark model trained with Edge Impulse, a free tool for training small sound models.
+   - [barkdetect](https://github.com/HenryWConklin/barkdetect) is a small bark filter built with the pyAudioAnalysis library.
+2. **A bark resets to the session's starting interval.** Within a session, a bark always drops back to where that session started. Saved progress protects longer-term gains, but some trainers prefer an even softer within-session reset (for example, stepping back only to half the current interval). That would be a small change in the `on_bark` function in `bark_trainer.py`.
+3. **Untested on real hardware.** The logic is tested in simulation only.
 
 ---
 
@@ -307,3 +337,4 @@ Across several days, you're hoping to see **fewer barks per session** and the **
 | `bark_trainer.py` | The program. |
 | `requirements.txt` | The add-on packages it needs. |
 | `README.md` | This guide. |
+| `dog_progress.json` | Created automatically on the first real run; your dog's saved progress. Not uploaded to GitHub. |
