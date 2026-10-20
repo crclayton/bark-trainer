@@ -11,8 +11,11 @@ Uses DRO (differential reinforcement of other behaviour) with an interval that g
 
 Hardware is optional:
   - Microphone: needs `pip install sounddevice numpy`. Without it, use --simulate.
-  - Dispenser: --gpio PIN pulses a Raspberry Pi pin (needs gpiozero), or
-    --dispense-cmd "..." runs any shell command. With neither, treats are only logged.
+  - Dispenser (see "Choosing a dispenser" in README.md for specific products):
+      --gpio PIN          switch a relay/optocoupler, e.g. wired across a remote's button
+      --servo PIN         spin a continuous-rotation servo (DIY 3D-printed dispensers)
+      --dispense-cmd ".." run any command, e.g. mosquitto_pub or curl for Wi-Fi/Zigbee feeders
+    With none of these, treats are only logged. --test-dispense fires one treat and exits.
 
 Examples:
   python3 bark_trainer.py --simulate                    # test the logic, no hardware
@@ -128,17 +131,26 @@ class BarkDetector:
 
 
 class Dispenser:
-    def __init__(self, gpio_pin=None, command=None, pulse=0.3):
-        self.command, self.pulse, self.device = command, pulse, None
+    def __init__(self, gpio_pin=None, command=None, pulse=0.3, servo_pin=None):
+        self.command, self.pulse, self.device, self.servo = command, pulse, None, None
         if gpio_pin is not None:
             from gpiozero import OutputDevice
             self.device = OutputDevice(gpio_pin)
+        if servo_pin is not None:
+            from gpiozero import Servo
+            self.servo = Servo(servo_pin)
+            self.servo.detach()
 
     def dispense(self):
         if self.device is not None:
             self.device.on()
             time.sleep(self.pulse)
             self.device.off()
+        elif self.servo is not None:
+            # Continuous-rotation servo: spin for `pulse` seconds, then stop.
+            self.servo.max()
+            time.sleep(self.pulse)
+            self.servo.detach()
         elif self.command:
             subprocess.run(self.command, shell=True, check=False, timeout=10)
         else:
@@ -158,7 +170,7 @@ def drain(q):
 
 def run_live(args, cfg):
     events_out = EventLog(args.log_file)
-    dispenser = Dispenser(args.gpio, args.dispense_cmd, args.pulse)
+    dispenser = make_dispenser(args)
     with BarkDetector(args.threshold, args.min_bark_ms, device=args.device) as mic:
         if args.baseline > 0:
             log.info("Baseline: listening for %.0f s without rewarding...", args.baseline)
@@ -190,6 +202,10 @@ def run_live(args, cfg):
             pass
     summarize(sched, time.monotonic() - start)
     events_out.close()
+
+
+def make_dispenser(args):
+    return Dispenser(args.gpio, args.dispense_cmd, args.pulse, args.servo)
 
 
 def calibrate(args):
@@ -284,8 +300,10 @@ def main(argv=None):
     h.add_argument("--mute-after-treat", type=float, default=1.5,
                    help="ignore sound this many seconds after dispensing (motor, crunching)")
     h.add_argument("--gpio", type=int, help="Raspberry Pi GPIO pin that triggers the dispenser")
-    h.add_argument("--pulse", type=float, default=0.3, help="GPIO pulse length, seconds")
+    h.add_argument("--servo", type=int, help="GPIO pin driving a continuous-rotation servo")
+    h.add_argument("--pulse", type=float, default=0.3, help="seconds to hold the relay on / spin the servo")
     h.add_argument("--dispense-cmd", help="shell command that dispenses one treat")
+    h.add_argument("--test-dispense", action="store_true", help="dispense one treat and exit")
     h.add_argument("--log-file", help="append events to this CSV")
     h.add_argument("--calibrate", type=int, nargs="?", const=20, help="show mic levels for N seconds and exit")
     m = p.add_argument_group("simulation")
@@ -302,7 +320,10 @@ def main(argv=None):
         run_simulation(args, cfg)
         return
     try:
-        if args.calibrate:
+        if args.test_dispense:
+            make_dispenser(args).dispense()
+            log.info("Test dispense finished.")
+        elif args.calibrate:
             calibrate(args)
         else:
             run_live(args, cfg)

@@ -9,7 +9,7 @@ A program that teaches a dog to stay quiet. A microphone listens for barking, an
 ## Contents
 
 1. [How the training works](#how-the-training-works)
-2. [What you need](#what-you-need)
+2. [What you need](#what-you-need) (including [Choosing a dispenser](#choosing-a-dispenser))
 3. [Setup, step by step](#setup-step-by-step)
 4. [Running a training session](#running-a-training-session)
 5. [Settings you can change](#settings-you-can-change)
@@ -50,10 +50,53 @@ In the simulation, a dog that started out barking every 8 seconds was going seve
 |---|---|
 | **A computer to run the program** | A **Raspberry Pi** (any model from 3 up) is the easiest choice because it can switch the dispenser on directly. A Linux laptop, Mac, or Windows PC also works if your dispenser can be triggered some other way (see below). |
 | **A USB microphone** | Any cheap USB microphone or webcam microphone. Put it near where the dog usually barks. |
-| **An automatic treat dispenser** | It needs to be something the computer can trigger. Two common options: <br>• **A dispenser with a button or motor, wired through a relay module** to a Raspberry Pi pin. This needs some basic wiring; a "5V relay module for Raspberry Pi" costs a few dollars. <br>• **A smart or Wi-Fi dispenser** that you can trigger with a command or web address. The program can run any command you give it. |
+| **An automatic treat dispenser** | It must be one the computer can trigger. See [Choosing a dispenser](#choosing-a-dispenser) below. |
 | **Small, soft treats** | Small enough that the dog can eat one in a second or two. |
 
-> ⚠️ If you wire a relay, keep mains (wall-socket) electricity out of it unless you know what you're doing. Battery- or USB-powered dispensers are much safer to modify.
+### Choosing a dispenser
+
+Most pet cameras and smart feeders (Furbo, Petcube, most Wi-Fi feeders) **can only be triggered from their own phone app**, so this program can't control them. The options below *can* be controlled. Prices are rough guides (as of late 2026); check current prices before buying.
+
+| Option | How the program controls it | Skill needed | Approx. cost |
+|---|---|---|---|
+| **A. PetSafe Treat & Train** (recommended) | **Wired:** a Raspberry Pi presses the remote's button electronically | Basic soldering | ~$150 + ~$5 parts |
+| **B. Aqara Pet Feeder C1** | **Wireless:** Zigbee radio, through a USB Zigbee stick | Comfortable installing software | ~$100–150 + ~$30 stick |
+| **C. Build your own** (3D-printed + servo) | **Wired:** Raspberry Pi drives a small motor directly | 3D printer + basic wiring | ~$30–200 |
+
+#### A. PetSafe Treat & Train (wired through its remote) — recommended
+
+- **Product:** [PetSafe Treat & Train Remote Reward Dog Trainer](https://store.petsafe.net/treat-train-remote-reward-dog-trainer) (UK/EU: [uk.petsafe.net](https://uk.petsafe.net/products/treat-and-train)). Similar models: [PetSafe Teach & Treat](https://store.petsafe.net/teach-treat-remote-reward-trainer).
+- **Why:** It was designed by a vet behaviourist for exactly this kind of quiet-behaviour training. It drops one treat per button press, holds about 3 cups of treats, and runs on batteries.
+- **How it connects:** Open the handheld remote and solder two thin wires to either side of its "treat" button. Connect those wires to an **optocoupler** (an electronic switch that keeps the Pi and remote electrically separate; search "PC817 optocoupler module") or a small **relay module**, and connect that to Raspberry Pi pin GPIO 17. When the program switches the pin on, it's the same as pressing the button.
+- **Command:** `python3 bark_trainer.py --gpio 17 --pulse 0.3`
+- **Note:** Opening the remote may void its warranty. The dispenser itself is untouched.
+
+#### B. Aqara Pet Feeder C1 (wireless, Zigbee)
+
+- **Product:** [Aqara Smart Pet Feeder C1](https://www.aqara.com/) (model ZNCWWSQ01LM; [review](https://smarthomescene.com/reviews/aqara-c1-smart-pet-feeder-review/)).
+- **Why:** Unlike most smart feeders, it can be controlled locally, without the manufacturer's cloud, using the free [Zigbee2MQTT](https://www.zigbee2mqtt.io/) software and a USB Zigbee adapter (for example the "Sonoff Zigbee 3.0 USB Dongle Plus").
+- **How it connects:** Install Zigbee2MQTT and an MQTT broker (`sudo apt install mosquitto mosquitto-clients`) on the Pi, pair the feeder by holding its button for 5 seconds, and give it a name such as `dog_feeder`. The feed command is documented on the [Zigbee2MQTT device page](https://www.zigbee2mqtt.io/devices/ZNCWWSQ01LM.html).
+- **Command:**
+  ```
+  python3 bark_trainer.py --dispense-cmd "mosquitto_pub -t zigbee2mqtt/dog_feeder/set -m '{\"feed\":\"START\"}'"
+  ```
+- **Notes:** It's a meal feeder, so each "portion" is bigger than one training treat (about 5–10 g of kibble). Use small kibble, set the smallest portion size, and lower `--max-treats` to avoid overfeeding. If you already use **Home Assistant**, you can instead trigger its feed button with a `curl` command to Home Assistant's REST API.
+
+#### C. Build your own (3D-printed, servo-driven)
+
+- **Projects with free designs:**
+  - [OpenTreat](https://github.com/un1xg0d/opentreat): Raspberry Pi with an SG90 servo, signal wire on GPIO 17. Simplest build.
+  - [Arce & Stevens open-hardware dog treat dispenser](https://digitalcommons.unl.edu/electricalengineeringfacpub/694): designed for dog behaviour research, holds 59 treats, under $200, fully 3D printable ([PDF paper](https://decisionslab.unl.edu/pubs/arce_stevens_2022.pdf)). Uses a stepper motor, so trigger it with `--dispense-cmd` and the project's own script.
+  - [KibbleBot](https://www.printables.com/model/804411-kibblebot-the-smart-treat-dispenser): 3D-printed with minimal electronics.
+  - [Instructables: Dog Treat Dispenser](https://www.instructables.com/Dog-Treat-Dispenser/): step-by-step photos.
+- **Command (servo builds):** `python3 bark_trainer.py --servo 17 --pulse 0.5`. The `--servo` option is for **continuous-rotation** ("360°") servos. Adjust `--pulse` until exactly one treat drops.
+
+#### Not recommended
+
+- **Pet Tutor:** a popular trainer's dispenser, but it works only over Bluetooth from its own app, with no published way for other programs to control it.
+- **Furbo, Petcube Bites, and most Wi-Fi feeders:** app-only. Some older Tuya-based models (for example certain PETLIBRO feeders) can be hacked into Home Assistant, but newer models can't, so it's hit-and-miss.
+
+> ⚠️ Whatever you choose, keep mains (wall-socket) electricity out of any wiring you do yourself. All the options above run on batteries or USB power.
 
 ### Software
 
@@ -128,19 +171,23 @@ Pick a threshold **between** those two, closer to the barks, for example **−25
 
 ### 5. Check the dispenser on its own
 
-**Raspberry Pi with a relay:** connect the relay's signal wire to a GPIO pin (pin 17 in these examples). Then do a short dry run with no baseline and a 1-minute session:
+First, dispense a single treat with the option that matches your dispenser (see [Choosing a dispenser](#choosing-a-dispenser)):
+
+```
+python3 bark_trainer.py --test-dispense --gpio 17           # A. Treat & Train via relay
+python3 bark_trainer.py --test-dispense --dispense-cmd "..." # B. Aqara / any command
+python3 bark_trainer.py --test-dispense --servo 17          # C. DIY servo build
+```
+
+If no treat comes out, adjust `--pulse` (longer = longer button press or more spinning) and try again.
+
+Then do a 1-minute trial with no baseline, using the same option:
 
 ```
 python3 bark_trainer.py --gpio 17 --baseline 0 --duration 60
 ```
 
 You should hear the dispenser go off every few seconds while the room is quiet.
-
-**Smart / Wi-Fi dispenser:** replace the command in quotes with whatever triggers yours:
-
-```
-python3 bark_trainer.py --dispense-cmd "curl http://192.168.1.50/feed" --baseline 0 --duration 60
-```
 
 **No dispenser yet?** Leave out both options. The program will listen and print "TREAT" when it *would* have given one, so you can watch how it behaves first.
 
@@ -193,9 +240,11 @@ Add any of these to the command. Example: `--growth 1.1 --max-treats 80`.
 | `--min-bark-ms` | `60` | A sound must stay loud this many milliseconds to count. Raise it if short clicks or bangs are counted as barks. |
 | `--mute-after-treat` | `1.5` | Seconds to ignore sound after each treat, so the dispenser motor and crunching don't count as barks. |
 | `--device` | system default | Which microphone to use, if you have more than one. |
-| `--gpio` | none | Raspberry Pi pin connected to the dispenser relay. |
-| `--pulse` | `0.3` | How long to switch the pin on per treat, in seconds. Increase it if the dispenser doesn't release a treat. |
-| `--dispense-cmd` | none | Any command that dispenses one treat. |
+| `--gpio` | none | Raspberry Pi pin connected to the dispenser relay or optocoupler. |
+| `--servo` | none | Raspberry Pi pin connected to a continuous-rotation servo (DIY builds). |
+| `--pulse` | `0.3` | Seconds to hold the relay on or spin the servo per treat. Increase it if no treat comes out. |
+| `--dispense-cmd` | none | Any command that dispenses one treat (e.g. for the Aqara feeder). |
+| `--test-dispense` | — | Dispense one treat and stop. Use this to check the wiring. |
 | `--log-file` | none | Saves every bark and treat to a spreadsheet file (CSV). |
 
 Run `python3 bark_trainer.py --help` to see the full list.
